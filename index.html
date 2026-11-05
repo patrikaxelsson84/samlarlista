@@ -86,6 +86,17 @@ h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0}
   .row{grid-template-columns:2.3rem auto minmax(0,1fr) auto;grid-template-areas:"n m m s" ". a b b";row-gap:4px;padding-block:6px}
   .num{grid-area:n}.nm{grid-area:m}.sym{grid-area:s}.vn{grid-area:a}.vr{grid-area:b;margin-left:14px}
 }
+.sharebtn{margin-left:auto}
+.sharebox{background:var(--sheet);border:2px solid var(--ink);border-radius:8px;padding:14px;margin-bottom:12px;display:grid;gap:10px}
+.sharebox label{font-size:.85rem;font-weight:600}
+.sharebox input{width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);font:inherit}
+.sharebox .acts{display:flex;gap:8px;flex-wrap:wrap}
+.sharelink{font-family:ui-monospace,Menlo,monospace;font-size:.8rem;background:var(--band);padding:8px 10px;border-radius:6px;overflow-wrap:anywhere;user-select:all}
+.go{background:var(--own);border-color:var(--own);color:var(--own-ink)}
+.ro-banner{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between;background:var(--ink);color:var(--paper);border-radius:8px;padding:12px 14px;margin-top:4px}
+.ro-banner b{font-family:var(--display);font-size:1.15rem;font-weight:700}
+.ro-banner .back{border-color:var(--paper)}
+.ct.ro{min-width:1.6em;text-align:left;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){.bx{transition:none}}
 </style>
 
@@ -106,7 +117,43 @@ const timers = {};
 const k = (v,num) => v + '_' + num.replace('!','EXC').replace('?','QST');
 function lsGet(id){ try{ return JSON.parse(localStorage.getItem('ptcg:'+id)||'null'); }catch(e){ return null; } }
 function lsSet(id,o){ try{ localStorage.setItem('ptcg:'+id, JSON.stringify(o)); }catch(e){} }
-function get(id){ if(!counts[id]) counts[id] = lsGet(id) || {}; return counts[id]; }
+let SHARED = null; // {id, name, c} when viewing someone else's list
+function get(id){ if(SHARED && SHARED.id===id) return SHARED.c; if(!counts[id]) counts[id] = lsGet(id) || {}; return counts[id]; }
+
+/* ---------- share links ---------- */
+function encodeSet(id){
+  const c = get(id); let out = '', zeros = 0;
+  const push = v => { if(v===0){ zeros++; return; } flush(); out += Math.min(v,35).toString(36); };
+  const flush = () => { if(zeros>=3) out += '-' + zeros.toString(36) + '-'; else out += '0'.repeat(zeros); zeros = 0; };
+  for(const [num,,,t] of DATA.cards[id]){ push(c[k('n',num)]||0); if(t&1) push(c[k('r',num)]||0); }
+  flush();
+  return out.replace(/-[0-9a-z]+-$/,'');
+}
+function decodeSet(id, payload){
+  const vals = []; let i = 0;
+  while(i < payload.length){
+    const ch = payload[i];
+    if(ch==='-'){ const j = payload.indexOf('-', i+1); if(j<0) break; const n = parseInt(payload.slice(i+1,j),36)||0; for(let z=0;z<n;z++) vals.push(0); i = j+1; }
+    else { vals.push(parseInt(ch,36)||0); i++; }
+  }
+  const c = {}; let p = 0;
+  for(const [num,,,t] of DATA.cards[id]){
+    const n = vals[p++]||0; if(n) c[k('n',num)] = n;
+    if(t&1){ const r = vals[p++]||0; if(r) c[k('r',num)] = r; }
+  }
+  return c;
+}
+function shareName(){ try{ return localStorage.getItem('ptcg-name')||''; }catch(e){ return ''; } }
+function shareURL(id){
+  const name = encodeURIComponent(shareName().trim()).replace(/\./g,'%2E');
+  return location.origin + location.pathname + '#dela.' + id + '.' + DATA.cards[id].length + '.' + name + '.' + encodeSet(id);
+}
+function parseShare(){
+  const m = location.hash.match(/^#dela\.([a-z0-9-]+)\.(\d+)\.([^.]*)\.([0-9a-z-]*)$/);
+  if(!m || !BYID[m[1]]) return null;
+  let name = ''; try{ name = decodeURIComponent(m[3]); }catch(e){}
+  return {id:m[1], name, mismatch: +m[2] !== DATA.cards[m[1]].length, c: decodeSet(m[1], m[4])};
+}
 function persist(id){
   lsSet(id, counts[id]);
   clearTimeout(timers[id]);
@@ -241,6 +288,7 @@ function variantHTML(v, num, t, c){
   const n = c[k(v,num)]||0;
   const L = v==='r' ? 'R' : ((t&2)?'H':'N');
   const lbl = v==='r' ? 'reverse holo' : ((t&2)?'holo':'normal');
+  if(SHARED) return `<span class="v v${v}"><span class="bx ${n?'on':''}" role="img" aria-label="${lbl}: ${n}">${L}</span><span class="ct ro">${n?'×'+n:''}</span></span>`;
   return `<span class="v v${v}"><button class="bx ${n?'on':''}" data-a="tog" data-v="${v}" data-num="${esc(num)}" aria-pressed="${n>0}" aria-label="${lbl}">${L}</button>`+
     `<button class="pm" data-a="dec" data-v="${v}" data-num="${esc(num)}" aria-label="Ta bort ett ${lbl}" ${n?'':'disabled'}>−</button>`+
     `<span class="ct">${n}</span>`+
@@ -267,7 +315,15 @@ function statsHTML(id){
 function renderSet(id){
   const s = BYID[id];
   app.innerHTML = `
-    <div class="bar" style="margin-top:4px"><a class="back" href="#">← Alla serier</a></div>
+    ${SHARED ? `<div class="ro-banner"><div><small>Delad lista</small><br><b>${SHARED.name?esc(SHARED.name)+'s samling':'Någons samling'}</b></div><a class="back" href="#">Öppna min egen samling</a></div>
+      ${SHARED.mismatch?'<p class="note"><b>Kortlistan har ändrats sedan länken skapades, så några kort kan visas fel.</b></p>':''}`
+    : `<div class="bar" style="margin-top:4px"><a class="back" href="#">← Alla serier</a><button class="back go sharebtn" id="sharebtn">Dela serien</button></div>
+    <div class="sharebox" id="sharebox" hidden>
+      <div><label for="sname">Ditt namn (visas för den du delar med)</label><input id="sname" type="text" value="${esc(shareName())}" placeholder="Ditt namn" autocomplete="given-name"></div>
+      <div class="acts"><button class="back go" id="sendlink">Skicka länk</button><button class="back" id="copylink">Kopiera länk</button><button class="back" id="closeshare">Stäng</button></div>
+      <p class="note" style="margin:0">Mottagaren ser vilka kort du har i serien just nu. Ändrar du något senare skickar du en ny länk.</p>
+      <div class="sharelink" id="sharelink" hidden></div>
+    </div>`}
     <div class="head"><h1><small>${esc(s.series)} · ${esc(s.code||'')} · ${s.date.slice(0,4)}</small>${esc(s.name)}</h1><div class="stats" id="stats">${statsHTML(id)}</div></div>
     <div class="bar">
       <div class="seg" role="group" aria-label="Visa">${[['all','Alla'],['miss','Saknas'],['have','Har']].map(([f,l])=>`<button data-f="${f}" aria-pressed="${filter===f}">${l}</button>`).join('')}</div>
@@ -276,7 +332,23 @@ function renderSet(id){
     <div class="list" id="list">${rowsHTML(id)}</div>
     <div class="legend"><span><b>N</b> normal</span><span><b>H</b> holo</span><span><b>R</b> reverse holo</span><span><b>●</b> common</span><span><b>◆</b> uncommon</span><span><b>★</b> rare</span><span><b>★H</b> holo rare</span><span><b>☆</b> holo rare V</span><span><b>☆X</b> VMAX</span><span><b>V☆</b> VSTAR</span><span><b>★U</b> ultra rare</span><span><b>★S</b> secret rare</span></div>`;
   const list = document.getElementById('list');
+  if(!SHARED){
+    const box=document.getElementById('sharebox');
+    document.getElementById('sharebtn').onclick=()=>{ box.hidden=!box.hidden; };
+    document.getElementById('closeshare').onclick=()=>{ box.hidden=true; };
+    document.getElementById('sname').oninput=e=>{ try{ localStorage.setItem('ptcg-name', e.target.value); }catch(_){} };
+    const showLink=(msg)=>{ const l=document.getElementById('sharelink'); l.hidden=false; l.textContent=shareURL(id); if(msg) l.insertAdjacentHTML('beforebegin',''); return l; };
+    document.getElementById('sendlink').onclick=async()=>{
+      const url=shareURL(id), nm=shareName().trim();
+      const text=(nm?nm+'s':'Min')+' samling av '+s.name+': '+progress(id).have+'/'+progress(id).total+' kort';
+      if(navigator.share){ try{ await navigator.share({title:s.name, text, url}); return; }catch(e){ if(e&&e.name==='AbortError') return; } }
+      copy(url);
+    };
+    const copy=async(url)=>{ const b=document.getElementById('copylink'); try{ await navigator.clipboard.writeText(url); b.textContent='Kopierad ✓'; }catch(e){ const l=showLink(); const r=document.createRange(); r.selectNodeContents(l); const sel=getSelection(); sel.removeAllRanges(); sel.addRange(r); b.textContent='Markerad, kopiera'; } };
+    document.getElementById('copylink').onclick=()=>copy(shareURL(id));
+  }
   list.addEventListener('click', e=>{
+    if(SHARED) return;
     const b = e.target.closest('button[data-a]'); if(!b) return;
     const c = get(id), key = k(b.dataset.v, b.dataset.num);
     let n = c[key]||0;
@@ -297,11 +369,13 @@ function renderSet(id){
 
 /* ---------- routing ---------- */
 function render(){
+  SHARED = parseShare();
+  if(SHARED){ renderSet(SHARED.id); return; }
   const m = location.hash.match(/^#set-([a-z0-9-]+)$/);
   if(m && BYID[m[1]]) renderSet(m[1]); else renderMenu();
 }
 let lastHash = location.hash;
-window.addEventListener('hashchange', ()=>{ if(location.hash.startsWith('#set-')){ cardQuery=''; filter='all'; } render(); window.scrollTo(0,0); });
+window.addEventListener('hashchange', ()=>{ if(location.hash.startsWith('#set-')||location.hash.startsWith('#dela.')){ cardQuery=''; filter='all'; } render(); window.scrollTo(0,0); });
 render();
 </script>
 
